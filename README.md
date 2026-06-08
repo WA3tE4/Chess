@@ -1,2 +1,0 @@
-# Chess
-as per title :)
