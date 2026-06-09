@@ -1274,17 +1274,40 @@ body.theme-cyber   {
   .piece { font-size: 1.9rem; }
   .hud-clock { font-size: 1.4rem; }
   .board-outer { padding: 20px; }
+  /* Coords: offset matches board-outer padding of 20px */
+  .coords-files { left: 20px; }
+  .coords-ranks { top: 20px; }
   .eval-bar { display: none; }
   .eval-bar-wrap { display: none; }
 }
 
 @media (max-width: 680px) {
-  :root { --sq-size: 38px; }
+  /* Viewport-relative square size:
+     available width = 100vw - 32px (layout padding) - 40px (board-outer padding) = 100vw - 72px
+     divided by 8 squares, capped at 44px */
+  :root { --sq-size: min(calc((100vw - 72px) / 8), 44px); }
   .game-layout { flex-wrap: wrap; justify-content: center; gap: 10px; }
-  .side-hud { width: 100%; flex-direction: row; flex-wrap: wrap; gap: 6px; max-width: calc(8 * 38px + 56px); }
+  .side-hud {
+    width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-width: calc(8 * var(--sq-size) + 40px);
+  }
   .side-hud .hud-panel { display: none; }
   .hud-player-card { flex: 1; min-width: 140px; }
   .piece { font-size: 1.6rem; }
+}
+
+/* Menu responsive — prevents 580px fixed-width overflow on phones */
+@media (max-width: 620px) {
+  .menu-config-grid { width: 100%; max-width: calc(100vw - 32px); grid-template-columns: 1fr; }
+  .menu-play-btn    { width: 100%; max-width: calc(100vw - 32px); }
+}
+
+/* Touch: eliminate 300ms tap delay on iOS for board squares and buttons */
+.sq, .btn-sm, .menu-play-btn, .btn-primary, .btn-secondary, .icon-btn {
+  touch-action: manipulation;
 }
 </style>
 </head>
@@ -2145,12 +2168,37 @@ const Engine = (() => {
   let thinking = false;
   let pendingCb = null;
   let evalCb = null;
+  let _thinkTimeout = null;
+
+  function _randomFallback() {
+    const cb = pendingCb;
+    pendingCb = null;
+    evalCb = null;
+    thinking = false;
+    clearTimeout(_thinkTimeout);
+    Board.setThinking(false);
+    if (!cb) return;
+    const game = State.getGame();
+    if (!game || game.game_over()) return;
+    const moves = game.moves({ verbose: true });
+    if (moves.length) {
+      const m = moves[Math.floor(Math.random() * moves.length)];
+      cb(m.from + m.to + (m.promotion || ''));
+    }
+  }
 
   function init() {
     try {
       worker = new Worker('https://cdn.jsdelivr.net/npm/stockfish@16.0.0/src/stockfish.js');
       worker.postMessage('uci');
       worker.onmessage = handleMsg;
+      // Mobile browsers (especially iOS Safari) silently fail to load
+      // cross-origin Workers — the constructor doesn't throw, but the
+      // worker never processes messages. onerror catches this case.
+      worker.onerror = () => {
+        worker = null;
+        if (thinking) _randomFallback();
+      };
     } catch(e) { worker = null; }
   }
 
@@ -2164,6 +2212,7 @@ const Engine = (() => {
     }
 
     if (line.includes('bestmove') && pendingCb) {
+      clearTimeout(_thinkTimeout);
       thinking = false;
       const parts = line.split(' ');
       const best = parts[1];
@@ -2182,16 +2231,15 @@ const Engine = (() => {
     Board.setThinking(true);
 
     if (!worker) {
-      // Fallback: random move
-      thinking = false;
-      Board.setThinking(false);
-      const moves = State.getGame().moves({ verbose: true });
-      if (moves.length) {
-        const m = moves[Math.floor(Math.random() * moves.length)];
-        moveCb(m.from + m.to + (m.promotion || ''));
-      }
+      // Worker unavailable — use random move with small delay for UX
+      setTimeout(_randomFallback, 300);
       return;
     }
+
+    // Safety timeout: if Stockfish doesn't respond (e.g. silent worker
+    // failure on mobile), fall back to a random move after 8 seconds.
+    clearTimeout(_thinkTimeout);
+    _thinkTimeout = setTimeout(_randomFallback, 8000);
 
     worker.postMessage('position fen ' + fen);
     worker.postMessage('go depth ' + depth);
